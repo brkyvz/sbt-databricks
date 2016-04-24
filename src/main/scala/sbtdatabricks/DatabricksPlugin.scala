@@ -139,7 +139,7 @@ object DatabricksPlugin extends AutoPlugin {
 
   private def uploadImpl1(
       client: DatabricksHttp,
-      folder: String,
+      projectName: String,
       cp: Seq[File],
       existing: Seq[UploadedLibrary]): (Seq[UploadedLibrary], Seq[UploadedLibrary]) = {
     // TODO: try to figure out dependencies with changed versions
@@ -148,8 +148,8 @@ object DatabricksPlugin extends AutoPlugin {
     // Either upload the newer SNAPSHOT versions, or everything, because they don't exist yet.
       val toUpload = cp.toSet -- existing.map(_.jar) ++ toDelete.map(_.jar)
     val uploaded = toUpload.map { jar =>
-      val uploadedLib = client.uploadJar(jar.getName, jar, folder)
-      new UploadedLibrary(jar.getName, jar, uploadedLib.id)
+      val uploadedLib = client.uploadJar(projectName, jar.getName, jar)
+      new UploadedLibrary(jar.getName, jar, uploadedLib)
     }.toSeq
     (uploaded, toDelete)
   }
@@ -159,10 +159,10 @@ object DatabricksPlugin extends AutoPlugin {
   private lazy val uploadImpl: Def.Initialize[Task[(Seq[UploadedLibrary], Seq[UploadedLibrary])]] =
     Def.task {
       val client = dbcApiClient.value
-      val folder = dbcLibraryPath.value
+      // val folder = dbcLibraryPath.value
       val existing = existingLibraries.value
       val classpath = dbcClasspath.value
-      uploadImpl1(client, folder, classpath, existing)
+      uploadImpl1(client, name.value, classpath, existing)
     }
 
   private lazy val deployImpl: Def.Initialize[Task[Unit]] = Def.taskDyn {

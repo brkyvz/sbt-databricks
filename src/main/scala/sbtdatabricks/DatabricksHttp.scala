@@ -27,7 +27,7 @@ import com.fasterxml.jackson.module.scala.experimental.ScalaObjectMapper
 import org.apache.http.{HttpEntity, StatusLine, HttpResponse}
 import org.apache.http.auth.{AuthScope, UsernamePasswordCredentials}
 import org.apache.http.client.{HttpResponseException, HttpClient}
-import org.apache.http.client.entity.UrlEncodedFormEntity
+
 import org.apache.http.client.methods._
 import org.apache.http.client.utils.URLEncodedUtils
 import org.apache.http.conn.ssl.{SSLConnectionSocketFactory, TrustSelfSignedStrategy, SSLContextBuilder}
@@ -52,11 +52,7 @@ class DatabricksHttp(
     val client: HttpClient,
     outputStream: PrintStream = System.out) {
 
-  import DBApiEndpoints._
-
-  private val mapper = new ObjectMapper() with ScalaObjectMapper
-  mapper.registerModule(DefaultScalaModule)
-
+  import DatabricksHttp.mapper
   /**
    * Returns the response body as a string for HTTP 200 responses, or throws an exception with a
    * useful message for error responses.
@@ -83,28 +79,18 @@ class DatabricksHttp(
   }
 
   /**
-   * Upload a jar to Databrics Cloud.
+   * Upload a jar to Databricks Cloud.
    * @param name Name of the library to show on Databricks Cloud
    * @param file The jar file
-   * @param folder Where the library should be placed in the file browser in Databricks Cloud
-   * @return UploadedLibraryId corresponding to the artifact and its LibraryId in Databricks Cloud
+   * @return The path of the file in dbfs
    */
   private[sbtdatabricks] def uploadJar(
+      projectName: String,
       name: String,
-      file: File,
-      folder: String): UploadedLibraryId = {
-    outputStream.println(s"Uploading $name")
-    val post = new HttpPost(endpoint + LIBRARY_UPLOAD)
-    val entity = new MultipartEntity()
-
-    entity.addPart("name", new StringBody(name))
-    entity.addPart("libType", new StringBody("scala"))
-    entity.addPart("folder", new StringBody(folder))
-    entity.addPart("uri", new FileBody(file))
-    post.setEntity(entity)
-    val response = client.execute(post)
-    val stringResponse = handleResponse(response)
-    mapper.readValue[UploadedLibraryId](stringResponse)
+      file: File): String = {
+    val path = s"/FileStore/jars/sbt-databricks-uploads/$projectName/$name"
+    outputStream.println(s"Uploading $name to dbfs:$path")
+    send(UploadLibraryRequest(path, file))
   }
 
   /**
@@ -113,11 +99,7 @@ class DatabricksHttp(
    * @return The response from Databricks Cloud, i.e. the libraryId
    */
   private[sbtdatabricks] def deleteJar(libraryId: String): String = {
-    val post = new HttpPost(endpoint + LIBRARY_DELETE)
-    val form = List(new BasicNameValuePair("libraryId", libraryId))
-    post.setEntity(new UrlEncodedFormEntity(form))
-    val response = client.execute(post)
-    handleResponse(response)
+    send(DeleteLibraryRequestV1(libraryId))
   }
 
   /**
@@ -125,10 +107,7 @@ class DatabricksHttp(
    * @return List of Library metadata, i.e. (name, id, folder)
    */
   private[sbtdatabricks] def fetchLibraries: Seq[LibraryListResult] = {
-    val request = new HttpGet(endpoint + LIBRARY_LIST)
-    val response = client.execute(request)
-    val stringResponse = handleResponse(response)
-    mapper.readValue[Seq[LibraryListResult]](stringResponse)
+    mapper.readValue[Seq[LibraryListResult]](send(ListLibrariesRequestV1()))
   }
 
   /**
@@ -138,12 +117,7 @@ class DatabricksHttp(
    *         files, etc...
    */
   private[sbtdatabricks] def getLibraryStatus(libraryId: String): LibraryStatus = {
-    val form =
-      URLEncodedUtils.format(List(new BasicNameValuePair("libraryId", libraryId)), "utf-8")
-    val request = new HttpGet(endpoint + LIBRARY_STATUS + "?" + form)
-    val response = client.execute(request)
-    val stringResponse = handleResponse(response)
-    mapper.readValue[LibraryStatus](stringResponse)
+    mapper.readValue[LibraryStatus](send(GetLibraryStatusRequestV1(libraryId)))
   }
 
   /**
@@ -196,14 +170,9 @@ class DatabricksHttp(
   private[sbtdatabricks] def createContext(
       language: DBCExecutionLanguage,
       cluster: Cluster): ContextId = {
-    val msg = s"Creating '${language.is}' execution context on cluster '${cluster.name}'"
-    outputStream.println(msg)
-    val post = new HttpPost(endpoint + CONTEXT_CREATE)
-    val content = CreateContextRequestV1(language.is, cluster.id)
-    setJsonRequest(content, post)
-    val response = client.execute(post)
-    val responseString = handleResponse(response).trim
-    mapper.readValue[ContextId](responseString)
+    outputStream.println(
+      s"Creating '${language.is}' execution context on cluster '${cluster.name}'")
+    mapper.readValue[ContextId](send(CreateContextRequestV1(language.is, cluster.id)))
   }
 
   /**
@@ -212,18 +181,10 @@ class DatabricksHttp(
    * @param cluster the relevant cluster
    * @return status of the execution context
    */
-  private[sbtdatabricks] def checkContext(
-      contextId: ContextId,
-      cluster: Cluster): ContextStatus = {
-    val msg = s"Checking execution context on cluster '${cluster.name}'"
-    outputStream.println(msg)
-    val form =
-      URLEncodedUtils.format(List(new BasicNameValuePair("clusterId", cluster.id),
-                                  new BasicNameValuePair("contextId", contextId.id)), "utf-8")
-    val request = new HttpGet(endpoint + CONTEXT_STATUS + "?" + form)
-    val response = client.execute(request)
-    val responseString = handleResponse(response).trim
-    val contextStatus = mapper.readValue[ContextStatus](responseString)
+  private[sbtdatabricks] def checkContext(contextId: ContextId, cluster: Cluster): ContextStatus = {
+    outputStream.println(s"Checking execution context on cluster '${cluster.name}'")
+    val contextStatus =
+      mapper.readValue[ContextStatus](send(CheckContextRequestV1(contextId, cluster)))
     outputStream.println(contextStatus.toString)
     contextStatus
   }
@@ -237,14 +198,8 @@ class DatabricksHttp(
   private[sbtdatabricks] def destroyContext(
       contextId: ContextId,
       cluster: Cluster): ContextId = {
-    val msg = s"Terminating execution context on cluster '${cluster.name}'"
-    outputStream.println(msg)
-    val post = new HttpPost(endpoint + CONTEXT_DESTROY)
-    val content = DestroyContextRequestV1(cluster.id, contextId.id)
-    setJsonRequest(content, post)
-    val response = client.execute(post)
-    val responseString = handleResponse(response).trim
-    mapper.readValue[ContextId](responseString)
+    outputStream.println(s"Terminating execution context on cluster '${cluster.name}'")
+    mapper.readValue[ContextId](send(DestroyContextRequestV1(contextId.id, cluster.id)))
   }
 
 
@@ -263,18 +218,8 @@ class DatabricksHttp(
       contextId: ContextId,
       commandFile: File): CommandId = {
     outputStream.println(s"Executing '${language.is}' command on cluster '${cluster.name}'")
-    val post = new HttpPost(endpoint + COMMAND_EXECUTE)
-    val entity = new MultipartEntity()
-
-    entity.addPart("language", new StringBody(language.is))
-    entity.addPart("clusterId", new StringBody(cluster.id))
-    entity.addPart("contextId", new StringBody(contextId.id))
-    entity.addPart("command", new FileBody(commandFile))
-    post.setEntity(entity)
-
-    val response = client.execute(post)
-    val responseString = handleResponse(response).trim
-    mapper.readValue[CommandId](responseString)
+    mapper.readValue[CommandId](send(
+      ExecuteCommandRequestV1(language.is, cluster.id, contextId.id, commandFile)))
   }
 
   /**
@@ -289,16 +234,9 @@ class DatabricksHttp(
       cluster: Cluster,
       contextId: ContextId,
       commandId: CommandId): CommandStatus = {
-    val msg = s"Checking status of command on cluster '${cluster.name}'"
-    outputStream.println(msg)
-    val form =
-      URLEncodedUtils.format(List(new BasicNameValuePair("clusterId", cluster.id),
-                                  new BasicNameValuePair("contextId", contextId.id),
-                                  new BasicNameValuePair("commandId", commandId.id)), "utf-8")
-    val request = new HttpGet(endpoint + COMMAND_STATUS + "?" + form)
-    val response = client.execute(request)
-    val responseString = handleResponse(response).trim
-    val commandStatus = mapper.readValue[CommandStatus](responseString)
+    outputStream.println(s"Checking status of command on cluster '${cluster.name}'")
+    val commandStatus = mapper.readValue[CommandStatus](
+      send(CheckCommandRequestV1(cluster.id, contextId.id, commandId.id)))
     outputStream.println(commandStatus.toString)
     commandStatus
   }
@@ -316,12 +254,8 @@ class DatabricksHttp(
       contextId: ContextId,
       commandId: CommandId): CommandId = {
     outputStream.println(s"Cancelling command on cluster '${cluster.name}'")
-    val post = new HttpPost(endpoint + COMMAND_CANCEL)
-    val content = CancelCommandRequestV1(cluster.id, contextId.id, commandId.id)
-    setJsonRequest(content, post)
-    val response = client.execute(post)
-    val responseString = handleResponse(response).trim
-    mapper.readValue[CommandId](responseString)
+    mapper.readValue[CommandId](
+      send(CancelCommandRequestV1(cluster.id, contextId.id, commandId.id)))
   }
 
   /**
@@ -332,11 +266,7 @@ class DatabricksHttp(
    */
   private[sbtdatabricks] def attachToCluster(library: UploadedLibrary, cluster: Cluster): String = {
     outputStream.println(s"Attaching ${library.name} to cluster '${cluster.name}'")
-    val post = new HttpPost(endpoint + LIBRARY_ATTACH)
-    val content = LibraryAttachRequestV1(library.id, cluster.id)
-    setJsonRequest(content, post)
-    val response = client.execute(post)
-    handleResponse(response)
+    send(LibraryAttachRequestV1(library.id, cluster.id))
   }
 
   /**
@@ -344,10 +274,7 @@ class DatabricksHttp(
    * @return List of clusters (name, id, status, etc...)
    */
   private[sbtdatabricks] def fetchClusters: Seq[Cluster] = {
-    val request = new HttpGet(endpoint + CLUSTER_LIST)
-    val response = client.execute(request)
-    val stringResponse = handleResponse(response)
-    mapper.readValue[Seq[Cluster]](stringResponse)
+    mapper.readValue[Seq[Cluster]](send(ListClustersRequestV1()))
   }
 
   /**
@@ -356,22 +283,13 @@ class DatabricksHttp(
    * @return cluster's metadata (name, id, status, etc...)
    */
   private[sbtdatabricks] def clusterInfo(clusterId: String): Cluster = {
-    val form =
-      URLEncodedUtils.format(List(new BasicNameValuePair("clusterId", clusterId)), "utf-8")
-    val request = new HttpGet(endpoint + CLUSTER_INFO + "?" + form)
-    val response = client.execute(request)
-    val stringResponse = handleResponse(response)
-    mapper.readValue[Cluster](stringResponse)
+    mapper.readValue[Cluster](send(GetClusterStatusRequestV1(clusterId)))
   }
 
   /** Restart a cluster */
   private[sbtdatabricks] def restartCluster(cluster: Cluster): String = {
     outputStream.println(s"Restarting cluster: ${cluster.name}")
-    val post = new HttpPost(endpoint + CLUSTER_RESTART)
-    val content = RestartClusterRequestV1(cluster.id)
-    setJsonRequest(content, post)
-    val response = client.execute(post)
-    handleResponse(response)
+    send(RestartClusterRequestV1(cluster.id))
   }
 
   /**
@@ -403,10 +321,9 @@ class DatabricksHttp(
     }
   }
 
-  private def setJsonRequest(contents: DBApiRequest, post: HttpPost): Unit = {
-    val form = new StringEntity(mapper.writeValueAsString(contents))
-    form.setContentType("application/json")
-    post.setEntity(form)
+  private[this] def send(request: DBApiRequest): String = {
+    val response = client.execute(request.getRequest(endpoint))
+    handleResponse(response)
   }
 }
 
@@ -446,6 +363,9 @@ object DatabricksHttp {
     val outputFile = new PrintStream(file)
     new DatabricksHttp("test", client, outputFile)
   }
+
+  private[sbtdatabricks] val mapper = new ObjectMapper() with ScalaObjectMapper
+  mapper.registerModule(DefaultScalaModule)
 }
 
 // exposed for tests
@@ -476,4 +396,6 @@ object DBApiEndpoints {
   final val CLUSTER_CREATE = "/clusters/create"
   final val CLUSTER_RESIZE = "/clusters/resize"
   final val CLUSTER_DELETE = "/clusters/delete"
+
+  final val DBFS_PUT = "/dbfs/put"
 }
