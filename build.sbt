@@ -11,9 +11,7 @@ version := "0.1.5-SNAPSHOT"
 scalaVersion := "2.10.4"
 
 libraryDependencies ++= Seq(
-    "org.apache.httpcomponents" % "httpclient" % "4.3.3",
-    "org.apache.httpcomponents" % "httpmime" % "4.3.3",
-    "org.apache.httpcomponents" % "httpclient-cache" % "4.3.3",
+    "org.eclipse.jetty" % "jetty-client" % "9.3.7.v20160115",
     "com.fasterxml.jackson.module" %% "jackson-module-scala" % "2.5.3",
     "commons-fileupload" % "commons-fileupload" % "1.3")
 

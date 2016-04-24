@@ -18,25 +18,18 @@ package sbtdatabricks
 
 import java.io.PrintStream
 
+import scala.util.{Failure, Success, Try}
 import scala.util.control.NonFatal
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.scala.DefaultScalaModule
 import com.fasterxml.jackson.module.scala.experimental.ScalaObjectMapper
 
-import org.apache.http.{HttpEntity, StatusLine, HttpResponse}
-import org.apache.http.auth.{AuthScope, UsernamePasswordCredentials}
-import org.apache.http.client.{HttpResponseException, HttpClient}
-
-import org.apache.http.client.methods._
-import org.apache.http.client.utils.URLEncodedUtils
-import org.apache.http.conn.ssl.{SSLConnectionSocketFactory, TrustSelfSignedStrategy, SSLContextBuilder}
-import org.apache.http.entity.StringEntity
-import org.apache.http.entity.mime.MultipartEntity
-import org.apache.http.entity.mime.content.{FileBody, StringBody}
-import org.apache.http.impl.client.{BasicCredentialsProvider, HttpClients}
-import org.apache.http.message.BasicNameValuePair
-import org.apache.http.util.EntityUtils
+import org.eclipse.jetty.client.{HttpResponseException, HttpClient}
+import org.eclipse.jetty.client.api.Request
+import org.eclipse.jetty.client.util.BasicAuthentication
+import org.eclipse.jetty.http.{HttpHeader, HttpFields, HttpField}
+import org.eclipse.jetty.util.ssl.SslContextFactory
 
 import sbt._
 import scala.collection.JavaConversions._
@@ -53,30 +46,6 @@ class DatabricksHttp(
     outputStream: PrintStream = System.out) {
 
   import DatabricksHttp.mapper
-  /**
-   * Returns the response body as a string for HTTP 200 responses, or throws an exception with a
-   * useful message for error responses.
-   */
-  private def handleResponse(response: HttpResponse): String = {
-    val statusLine: StatusLine = response.getStatusLine
-    val entity: HttpEntity = response.getEntity
-    if (statusLine.getStatusCode >= 300) {
-      val errorMessage: String = {
-        if (entity != null) {
-          val stringResponse = EntityUtils.toString(entity)
-          try {
-            mapper.readValue[ErrorResponse](stringResponse).error
-          } catch {
-            case NonFatal(e) => statusLine.getReasonPhrase
-          }
-        } else {
-          statusLine.getReasonPhrase
-        }
-      }
-      throw new HttpResponseException(statusLine.getStatusCode, errorMessage)
-    }
-    if (entity == null) null else EntityUtils.toString(entity)
-  }
 
   /**
    * Upload a jar to Databricks Cloud.
@@ -85,12 +54,11 @@ class DatabricksHttp(
    * @return The path of the file in dbfs
    */
   private[sbtdatabricks] def uploadJar(
-      projectName: String,
       name: String,
-      file: File): String = {
-    val path = s"/FileStore/jars/sbt-databricks-uploads/$projectName/$name"
-    outputStream.println(s"Uploading $name to dbfs:$path")
-    send(UploadLibraryRequest(path, file))
+      file: File,
+      folder: String): UploadedLibraryId = {
+    outputStream.println(s"Uploading $name")
+    mapper.readValue[UploadedLibraryId](send(UploadLibraryRequest(name, file, folder)))
   }
 
   /**
@@ -321,40 +289,69 @@ class DatabricksHttp(
     }
   }
 
+  /**
+   * Returns the response body as a string for HTTP 200 responses, or throws an exception with a
+   * useful message for error responses.
+   */
   private[this] def send(request: DBApiRequest): String = {
-    val response = client.execute(request.getRequest(endpoint))
-    handleResponse(response)
+    Try(request.getRequest(client, endpoint).send()) match {
+      case Success(response) =>
+        if (response.getStatus >= 300) {
+          val errorMessage: String = {
+            if (response.getContentAsString != null) {
+              val stringResponse = response.getContentAsString
+              try {
+                mapper.readValue[ErrorResponse](stringResponse).error
+              } catch {
+                case NonFatal(e) => response.getReason
+              }
+            } else {
+              response.getReason
+            }
+          }
+          outputStream.println(s"ERROR: $errorMessage")
+          throw new HttpResponseException(errorMessage, response)
+        } else {
+          response.getContentAsString
+        }
+      case Failure(e) =>
+        outputStream.println(s"ERROR: ${e.getMessage}")
+        throw e
+    }
   }
 }
 
 object DatabricksHttp {
 
   /** Create an SSL client to handle communication. */
-  private[sbtdatabricks] def getApiClient(username: String, password: String): HttpClient = {
+  private[sbtdatabricks] def getApiClient(
+      endpoint: String,
+      username: String,
+      password: String): HttpClient = {
 
-      val builder = new SSLContextBuilder()
-      builder.loadTrustMaterial(null, new TrustSelfSignedStrategy())
-      // TLSv1.2 is only available in Java 7 and above
-      builder.useProtocol("TLSv1.2")
-      val sslsf = new SSLConnectionSocketFactory(builder.build())
-
-      val provider = new BasicCredentialsProvider
-      val credentials = new UsernamePasswordCredentials(username, password)
-      provider.setCredentials(AuthScope.ANY, credentials)
-
-      val client =
-        HttpClients.custom()
-          .setSSLSocketFactory(sslsf)
-          .setDefaultCredentialsProvider(provider)
-          .build()
-      client
+    val ssl = new SslContextFactory(true)
+    // TLSv1.2 is only available in Java 7 and above
+    ssl.setProtocol("TLSv1.2")
+    val index = endpoint.indexOf("/api")
+    val strippedEndpoint = if (index < 0) {
+      endpoint
+    } else {
+      endpoint.take(index)
+    }
+    val client = new HttpClient(ssl)
+    client.setFollowRedirects(false)
+    client.getAuthenticationStore.addAuthentication(new BasicAuthentication(
+      new URI(strippedEndpoint), "DatabricksRealm", username, password))
+    client.setUserAgentField(new HttpField(HttpHeader.USER_AGENT, "sbt-databricks"))
+    client.start()
+    client
   }
 
   private[sbtdatabricks] def apply(
       endpoint: String,
       username: String,
       password: String): DatabricksHttp = {
-    val cli = DatabricksHttp.getApiClient(username, password)
+    val cli = DatabricksHttp.getApiClient(endpoint, username, password)
     new DatabricksHttp(endpoint, cli)
   }
 
@@ -396,6 +393,4 @@ object DBApiEndpoints {
   final val CLUSTER_CREATE = "/clusters/create"
   final val CLUSTER_RESIZE = "/clusters/resize"
   final val CLUSTER_DELETE = "/clusters/delete"
-
-  final val DBFS_PUT = "/dbfs/put"
 }

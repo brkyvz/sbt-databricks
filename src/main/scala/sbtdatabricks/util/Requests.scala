@@ -17,16 +17,21 @@
 package sbtdatabricks.util
 
 import java.io.File
+import java.net.{URI, HttpCookie}
+import java.nio.charset.StandardCharsets
+import java.nio.file.{Paths, Path}
+import java.util
+import java.util.concurrent.TimeUnit
 
 import scala.collection.JavaConversions._
 
-import org.apache.http.client.entity.UrlEncodedFormEntity
-import org.apache.http.client.methods.{HttpGet, HttpPost, HttpRequestBase}
-import org.apache.http.client.utils.URLEncodedUtils
-import org.apache.http.entity.StringEntity
-import org.apache.http.entity.mime.MultipartEntity
-import org.apache.http.entity.mime.content.{FileBody, StringBody}
-import org.apache.http.message.BasicNameValuePair
+import org.eclipse.jetty.client.HttpClient
+import org.eclipse.jetty.client.api._
+import org.eclipse.jetty.client.api.Request.{CommitListener, QueuedListener, RequestListener, BeginListener}
+import org.eclipse.jetty.client.api.Response._
+import org.eclipse.jetty.client.util.{PathContentProvider, MultiPartContentProvider, StringContentProvider}
+import org.eclipse.jetty.http.{HttpMethod, HttpFields, HttpHeader, HttpVersion}
+import org.eclipse.jetty.util.{MultiPartWriter, Fields}
 
 import sbtdatabricks.{Cluster, ContextId, DatabricksHttp, DBApiEndpoints}
 
@@ -39,11 +44,11 @@ private[sbtdatabricks] object requests {
   sealed trait DBApiRequest {
     def apiVersion: String
 
-    final def getRequest(baseEndpoint: String): HttpRequestBase = {
-      getRequestInternal(getApiUrl(baseEndpoint))
+    final def getRequest(client: HttpClient, baseEndpoint: String): Request = {
+      getRequestInternal(client, getApiUrl(baseEndpoint))
     }
 
-    protected def getRequestInternal(endpoint: String): HttpRequestBase
+    protected def getRequestInternal(client: HttpClient, endpoint: String): Request
 
     private[this] def getApiUrl(endpoint: String): String = {
       val untilApi = endpoint.indexOf("/api")
@@ -70,24 +75,24 @@ private[sbtdatabricks] object requests {
 
   /** Request sent to create a Spark Context */
   case class CreateContextRequestV1(language: String, clusterId: String) extends DBApiV1Request {
-    override def getRequestInternal(endpoint: String): HttpRequestBase = {
-      setJsonRequest(this, new HttpPost(endpoint + CONTEXT_CREATE))
+    override def getRequestInternal(client: HttpClient, endpoint: String): Request = {
+      setJsonRequest(this, client.POST(endpoint + CONTEXT_CREATE))
     }
   }
 
   /** Request sent to create a Spark Context */
   case class CheckContextRequestV1(contextId: ContextId, cluster: Cluster) extends DBApiV1Request {
-    override def getRequestInternal(endpoint: String): HttpRequestBase = {
-      val form = URLEncodedUtils.format(List(new BasicNameValuePair("clusterId", cluster.id),
-        new BasicNameValuePair("contextId", contextId.id)), "utf-8")
-      new HttpGet(endpoint + CONTEXT_STATUS + "?" + form)
+    override def getRequestInternal(client: HttpClient, endpoint: String): Request = {
+      client.newRequest(endpoint + CONTEXT_STATUS)
+        .param("clusterId", cluster.id)
+        .param("contextId", contextId.id)
     }
   }
 
   /** Request sent to destroy a Spark Context */
   case class DestroyContextRequestV1(clusterId: String, contextId: String) extends DBApiV1Request {
-    override def getRequestInternal(endpoint: String): HttpRequestBase = {
-      setJsonRequest(this, new HttpPost(endpoint + CONTEXT_DESTROY))
+    override def getRequestInternal(client: HttpClient, endpoint: String): Request = {
+      setJsonRequest(this, client.POST(endpoint + CONTEXT_DESTROY))
     }
   }
 
@@ -100,8 +105,8 @@ private[sbtdatabricks] object requests {
       clusterId: String,
       contextId: String,
       commandId: String) extends DBApiV1Request {
-    override def getRequestInternal(endpoint: String): HttpRequestBase = {
-      setJsonRequest(this, new HttpPost(endpoint + COMMAND_CANCEL))
+    override def getRequestInternal(client: HttpClient, endpoint: String): Request = {
+      setJsonRequest(this, client.POST(endpoint + COMMAND_CANCEL))
     }
   }
 
@@ -110,11 +115,11 @@ private[sbtdatabricks] object requests {
       clusterId: String,
       contextId: String,
       commandId: String) extends DBApiV1Request {
-    override def getRequestInternal(endpoint: String): HttpRequestBase = {
-      val form = URLEncodedUtils.format(List(new BasicNameValuePair("clusterId", clusterId),
-        new BasicNameValuePair("contextId", contextId),
-        new BasicNameValuePair("commandId", commandId)), "utf-8")
-      new HttpGet(endpoint + COMMAND_STATUS + "?" + form)
+    override def getRequestInternal(client: HttpClient, endpoint: String): Request = {
+      client.newRequest(endpoint + COMMAND_STATUS)
+        .param("clusterId", clusterId)
+        .param("contextId", contextId)
+        .param("commandId", commandId)
     }
   }
 
@@ -124,15 +129,15 @@ private[sbtdatabricks] object requests {
       clusterId: String,
       contextId: String,
       commandFile: File) extends DBApiV1Request {
-    override def getRequestInternal(endpoint: String): HttpRequestBase = {
-      val post = new HttpPost(endpoint + COMMAND_EXECUTE)
-      val entity = new MultipartEntity()
-      entity.addPart("language", new StringBody(language))
-      entity.addPart("clusterId", new StringBody(clusterId))
-      entity.addPart("contextId", new StringBody(contextId))
-      entity.addPart("command", new FileBody(commandFile))
-      post.setEntity(entity)
-      post
+    override def getRequestInternal(client: HttpClient, endpoint: String): Request = {
+      val form = new MultiPartContentProvider()
+      form.addFieldPart("language", new StringContentProvider(language), null)
+      form.addFieldPart("clusterId", new StringContentProvider(clusterId), null)
+      form.addFieldPart("contextId", new StringContentProvider(contextId), null)
+      form.addFilePart("command", null,
+        new PathContentProvider(Paths.get(commandFile.getAbsolutePath)), null)
+      client.POST(endpoint + COMMAND_EXECUTE)
+        .content(form)
     }
   }
 
@@ -142,43 +147,41 @@ private[sbtdatabricks] object requests {
 
   /** Request sent to attach a library to a cluster */
   case class LibraryAttachRequestV1(libraryId: String, clusterId: String) extends DBApiV1Request {
-    override def getRequestInternal(endpoint: String): HttpRequestBase = {
-      setJsonRequest(this, new HttpPost(endpoint + LIBRARY_ATTACH))
+    override def getRequestInternal(client: HttpClient, endpoint: String): Request = {
+      setJsonRequest(this, client.POST(endpoint + LIBRARY_ATTACH))
     }
   }
 
   case class DeleteLibraryRequestV1(libraryId: String) extends DBApiV1Request {
-    override def getRequestInternal(endpoint: String): HttpRequestBase = {
-      val post = new HttpPost(endpoint + LIBRARY_DELETE)
-      val form = List(new BasicNameValuePair("libraryId", libraryId))
-      post.setEntity(new UrlEncodedFormEntity(form))
-      post
+    override def getRequestInternal(client: HttpClient, endpoint: String): Request = {
+      client.POST(endpoint + LIBRARY_DELETE)
+        .param("libraryId", libraryId)
     }
   }
 
   case class ListLibrariesRequestV1() extends DBApiV1Request {
-    override def getRequestInternal(endpoint: String): HttpRequestBase = {
-      new HttpGet(endpoint + LIBRARY_LIST)
+    override def getRequestInternal(client: HttpClient, endpoint: String): Request = {
+      client.newRequest(endpoint + LIBRARY_LIST)
     }
   }
 
   case class GetLibraryStatusRequestV1(libraryId: String) extends DBApiV1Request {
-    override def getRequestInternal(endpoint: String): HttpRequestBase = {
-      val form =
-        URLEncodedUtils.format(List(new BasicNameValuePair("libraryId", libraryId)), "utf-8")
-      new HttpGet(endpoint + LIBRARY_STATUS + "?" + form)
+    override def getRequestInternal(client: HttpClient, endpoint: String): Request = {
+      client.newRequest(endpoint + LIBRARY_STATUS)
+        .param("libraryId", libraryId)
     }
   }
 
-  case class UploadLibraryRequest(path: String, file: File) extends DBApiV2Request {
-    override def getRequestInternal(endpoint: String): HttpRequestBase = {
-      val post = new HttpPost(endpoint + DBFS_PUT)
-      val entity = new MultipartEntity()
-      entity.addPart("path", new StringBody(path))
-      entity.addPart("overwrite", new StringBody("true"))
-      entity.addPart("contents", new FileBody(file))
-      post.setEntity(entity)
-      post
+  case class UploadLibraryRequest(name: String, file: File, folder: String) extends DBApiV1Request {
+    override def getRequestInternal(client: HttpClient, endpoint: String): Request = {
+      val form = new MultiPartContentProvider()
+      form.addFieldPart("name", new StringContentProvider(name), null)
+      form.addFieldPart("libType", new StringContentProvider("scala"), null)
+      form.addFieldPart("folder", new StringContentProvider(folder), null)
+      form.addFilePart("uri", file.getName,
+        new PathContentProvider(Paths.get(file.getAbsolutePath)), null)
+      client.POST(endpoint + LIBRARY_UPLOAD)
+        .content(form)
     }
   }
 
@@ -188,31 +191,28 @@ private[sbtdatabricks] object requests {
 
   /** Request sent to restart a cluster */
   case class RestartClusterRequestV1(clusterId: String) extends DBApiV1Request {
-    override def getRequestInternal(endpoint: String): HttpRequestBase = {
-      setJsonRequest(this, new HttpPost(endpoint + CLUSTER_RESTART))
+    override def getRequestInternal(client: HttpClient, endpoint: String): Request = {
+      setJsonRequest(this, client.POST(endpoint + CLUSTER_RESTART))
     }
   }
 
   /** Request sent to get the status of a cluster */
   case class GetClusterStatusRequestV1(clusterId: String) extends DBApiV1Request {
-    override def getRequestInternal(endpoint: String): HttpRequestBase = {
-      val form =
-        URLEncodedUtils.format(List(new BasicNameValuePair("clusterId", clusterId)), "utf-8")
-      new HttpGet(endpoint + CLUSTER_INFO + "?" + form)
+    override def getRequestInternal(client: HttpClient, endpoint: String): Request = {
+      client.newRequest(endpoint + CLUSTER_INFO)
+        .param("clusterId", clusterId)
     }
   }
 
   /** Request sent to get the status of a cluster */
   case class ListClustersRequestV1() extends DBApiV1Request {
-    override def getRequestInternal(endpoint: String): HttpRequestBase = {
-      new HttpGet(endpoint + CLUSTER_LIST)
+    override def getRequestInternal(client: HttpClient, endpoint: String): Request = {
+      client.newRequest(endpoint + CLUSTER_LIST)
     }
   }
 
-  private[this] def setJsonRequest(contents: DBApiRequest, post: HttpPost): HttpPost = {
-    val form = new StringEntity(mapper.writeValueAsString(contents))
-    form.setContentType("application/json")
-    post.setEntity(form)
-    post
+  private[this] def setJsonRequest(contents: DBApiRequest, post: Request): Request = {
+    post.content(new StringContentProvider("application/json",
+      mapper.writeValueAsString(contents), StandardCharsets.UTF_8))
   }
 }
