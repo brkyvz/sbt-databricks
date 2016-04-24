@@ -17,21 +17,12 @@
 package sbtdatabricks.util
 
 import java.io.File
-import java.net.{URI, HttpCookie}
 import java.nio.charset.StandardCharsets
-import java.nio.file.{Paths, Path}
-import java.util
-import java.util.concurrent.TimeUnit
-
-import scala.collection.JavaConversions._
+import java.nio.file.Paths
 
 import org.eclipse.jetty.client.HttpClient
 import org.eclipse.jetty.client.api._
-import org.eclipse.jetty.client.api.Request.{CommitListener, QueuedListener, RequestListener, BeginListener}
-import org.eclipse.jetty.client.api.Response._
 import org.eclipse.jetty.client.util.{PathContentProvider, MultiPartContentProvider, StringContentProvider}
-import org.eclipse.jetty.http.{HttpMethod, HttpFields, HttpHeader, HttpVersion}
-import org.eclipse.jetty.util.{MultiPartWriter, Fields}
 
 import sbtdatabricks.{Cluster, ContextId, DatabricksHttp, DBApiEndpoints}
 
@@ -42,14 +33,21 @@ private[sbtdatabricks] object requests {
   import DatabricksHttp.mapper
 
   sealed trait DBApiRequest {
+    /** The version of the API this request is available in. */
     def apiVersion: String
 
+    /** Create the HttpRequest for the HttpClient for the given endpoint */
     final def getRequest(client: HttpClient, baseEndpoint: String): Request = {
       getRequestInternal(client, getApiUrl(baseEndpoint))
     }
 
+    /** Create the HttpRequest for the HttpClient for the normalized endpoint */
     protected def getRequestInternal(client: HttpClient, endpoint: String): Request
 
+    /**
+     * This method is here for backwards compatibility. We used to ask users to provide the URL with
+     * a given API version. Now we handle that internally based on the request.
+     */
     private[this] def getApiUrl(endpoint: String): String = {
       val untilApi = endpoint.indexOf("/api")
       if (untilApi < 0) {
@@ -73,14 +71,14 @@ private[sbtdatabricks] object requests {
   // Execution Context Requests
   ///////////////////////////////////////////
 
-  /** Request sent to create a Spark Context */
+  /** Request sent to create a Spark Context for the given language on the given cluster. */
   case class CreateContextRequestV1(language: String, clusterId: String) extends DBApiV1Request {
     override def getRequestInternal(client: HttpClient, endpoint: String): Request = {
       setJsonRequest(this, client.POST(endpoint + CONTEXT_CREATE))
     }
   }
 
-  /** Request sent to create a Spark Context */
+  /** Request sent to check the status of the Spark Context on the given cluster. */
   case class CheckContextRequestV1(contextId: ContextId, cluster: Cluster) extends DBApiV1Request {
     override def getRequestInternal(client: HttpClient, endpoint: String): Request = {
       client.newRequest(endpoint + CONTEXT_STATUS)
@@ -89,7 +87,7 @@ private[sbtdatabricks] object requests {
     }
   }
 
-  /** Request sent to destroy a Spark Context */
+  /** Request sent to destroy the given Spark Context on the given cluster. */
   case class DestroyContextRequestV1(clusterId: String, contextId: String) extends DBApiV1Request {
     override def getRequestInternal(client: HttpClient, endpoint: String): Request = {
       setJsonRequest(this, client.POST(endpoint + CONTEXT_DESTROY))
@@ -123,7 +121,7 @@ private[sbtdatabricks] object requests {
     }
   }
 
-  /** Request sent to check the status of a command */
+  /** Request to execute the given command with the given language on the given cluster */
   case class ExecuteCommandRequestV1(
       language: String,
       clusterId: String,
@@ -134,7 +132,7 @@ private[sbtdatabricks] object requests {
       form.addFieldPart("language", new StringContentProvider(language), null)
       form.addFieldPart("clusterId", new StringContentProvider(clusterId), null)
       form.addFieldPart("contextId", new StringContentProvider(contextId), null)
-      form.addFilePart("command", null,
+      form.addFilePart("command", commandFile.getName,
         new PathContentProvider(Paths.get(commandFile.getAbsolutePath)), null)
       client.POST(endpoint + COMMAND_EXECUTE)
         .content(form)
@@ -152,6 +150,7 @@ private[sbtdatabricks] object requests {
     }
   }
 
+  /** Request to delete the given library */
   case class DeleteLibraryRequestV1(libraryId: String) extends DBApiV1Request {
     override def getRequestInternal(client: HttpClient, endpoint: String): Request = {
       client.POST(endpoint + LIBRARY_DELETE)
@@ -159,12 +158,14 @@ private[sbtdatabricks] object requests {
     }
   }
 
+  /** Request to list all libraries */
   case class ListLibrariesRequestV1() extends DBApiV1Request {
     override def getRequestInternal(client: HttpClient, endpoint: String): Request = {
       client.newRequest(endpoint + LIBRARY_LIST)
     }
   }
 
+  /** Request sent to get the status of a library, e.g. which cluster's it is attached to */
   case class GetLibraryStatusRequestV1(libraryId: String) extends DBApiV1Request {
     override def getRequestInternal(client: HttpClient, endpoint: String): Request = {
       client.newRequest(endpoint + LIBRARY_STATUS)
@@ -172,6 +173,7 @@ private[sbtdatabricks] object requests {
     }
   }
 
+  /** Request sent to upload a library */
   case class UploadLibraryRequest(name: String, file: File, folder: String) extends DBApiV1Request {
     override def getRequestInternal(client: HttpClient, endpoint: String): Request = {
       val form = new MultiPartContentProvider()
@@ -204,13 +206,14 @@ private[sbtdatabricks] object requests {
     }
   }
 
-  /** Request sent to get the status of a cluster */
+  /** Request sent to list all clusters */
   case class ListClustersRequestV1() extends DBApiV1Request {
     override def getRequestInternal(client: HttpClient, endpoint: String): Request = {
       client.newRequest(endpoint + CLUSTER_LIST)
     }
   }
 
+  /** Quick wrapper for creating json representations for the requests. */
   private[this] def setJsonRequest(contents: DBApiRequest, post: Request): Request = {
     post.content(new StringContentProvider("application/json",
       mapper.writeValueAsString(contents), StandardCharsets.UTF_8))

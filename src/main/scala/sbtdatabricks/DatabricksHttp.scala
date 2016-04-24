@@ -26,9 +26,8 @@ import com.fasterxml.jackson.module.scala.DefaultScalaModule
 import com.fasterxml.jackson.module.scala.experimental.ScalaObjectMapper
 
 import org.eclipse.jetty.client.{HttpResponseException, HttpClient}
-import org.eclipse.jetty.client.api.Request
 import org.eclipse.jetty.client.util.BasicAuthentication
-import org.eclipse.jetty.http.{HttpHeader, HttpFields, HttpField}
+import org.eclipse.jetty.http.{HttpHeader, HttpField}
 import org.eclipse.jetty.util.ssl.SslContextFactory
 
 import sbt._
