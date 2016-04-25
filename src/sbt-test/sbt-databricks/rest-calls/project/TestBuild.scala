@@ -1,30 +1,51 @@
+/*
+ * Copyright 2015 Databricks
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.scala.DefaultScalaModule
 import com.fasterxml.jackson.module.scala.experimental.ScalaObjectMapper
-import org.apache.http.entity.StringEntity
-import org.apache.http.ProtocolVersion
-import org.apache.http.client.HttpClient
-import org.apache.http.client.methods.{HttpPost, HttpUriRequest}
-import org.apache.http.message.BasicHttpResponse
+import org.eclipse.jetty.client.api.Request
+import org.eclipse.jetty.client.util.StringContentProvider
+import org.eclipse.jetty.client.{HttpResponse, HttpContentResponse, HttpClient}
+
 import org.mockito.ArgumentCaptor
 import org.mockito.Matchers.{any, anyString}
 import org.mockito.Mockito._
 import org.mockito.invocation.InvocationOnMock
 import org.mockito.stubbing.Answer
-import org.scalatest.mock.MockitoSugar.{mock => mmock}
+import org.scalatest.mock.MockitoSugar
 
 import sbtdatabricks._
 import sbtdatabricks.DatabricksPlugin._
 import sbtdatabricks.DatabricksPlugin.autoImport._
 
+import scala.collection.JavaConversions.asScalaIterator
 import scala.io.Source
 import sbt._
 import Keys._
 
-object TestBuild extends Build {
+object TestBuild extends Build with MockitoSugar {
 
   val mapper = new ObjectMapper() with ScalaObjectMapper
   mapper.registerModule(DefaultScalaModule)
+
+  sealed trait DBRequest { def value: String }
+
+  case class Get(override val value: String) extends DBRequest
+  case class Post(override val value: String) extends DBRequest
 
   val dbcSettings = Seq(
     dbcApiUrl := "dummy",
@@ -44,7 +65,7 @@ object TestBuild extends Build {
     val expect = Seq(Cluster("a", "1", "running", "123", "234", 2))
     val response = mapper.writeValueAsString(expect)
     Seq(
-      dbcApiClient := mockClient(Seq(response), file("1") / "output.txt"),
+      dbcApiClient := mockClient(Seq(Get(response)), file("1") / "output.txt"),
       TaskKey[Unit]("test") := {
         val (fetchClusters, _) = dbcFetchClusters.value
         if (fetchClusters.length != 1) sys.error("Returned wrong number of clusters.")
@@ -61,7 +82,7 @@ object TestBuild extends Build {
       LibraryListResult("3", "ghi", "/"))
     val response = mapper.writeValueAsString(expect)
     Seq(
-      dbcApiClient := mockClient(Seq(response), file("2") / "output.txt"),
+      dbcApiClient := mockClient(Seq(Get(response)), file("2") / "output.txt"),
       TaskKey[Unit]("test") := {
         val libraries = dbcFetchLibraries.value
         if (libraries.size != 2) sys.error("Returned wrong number of libraries.")
@@ -83,8 +104,10 @@ object TestBuild extends Build {
     val res = mapper.writeValueAsString(Seq.empty[LibraryListResult])
     val outputFile = file("3") / "output.txt"
     Seq(
-      dbcApiClient := mockClient(Seq(res, uploadedLibResponse("1"), uploadedLibResponse("2"),
-        uploadedLibResponse("3")), outputFile),
+      dbcApiClient := mockClient(Seq(Get(res),
+        Post(uploadedLibResponse("1")),
+        Post(uploadedLibResponse("2")),
+        Post(uploadedLibResponse("3"))), outputFile),
       libraryDependencies += "com.databricks" %% "spark-csv" % "1.0.0",
       TaskKey[Unit]("test") := {
         dbcUpload.value
@@ -112,8 +135,12 @@ object TestBuild extends Build {
     Seq(
       name := "test4",
       version := "0.1-SNAPSHOT",
-      dbcApiClient := mockClient(Seq(res, "", // delete test4 because it is a SNAPSHOT version
-        uploadedLibResponse("5"), uploadedLibResponse("6"), uploadedLibResponse("7")), outputFile),
+      dbcApiClient := mockClient(Seq(
+        Get(res),
+        Post(""), // delete test4 because it is a SNAPSHOT version
+        Post(uploadedLibResponse("5")),
+        Post(uploadedLibResponse("6")),
+        Post(uploadedLibResponse("7"))), outputFile),
       libraryDependencies += "com.databricks" %% "spark-csv" % "1.0.0",
       TaskKey[Unit]("test") := {
         dbcUpload.value
@@ -139,7 +166,7 @@ object TestBuild extends Build {
     val response = mapper.writeValueAsString(exampleClusters)
     val outputFile = file("5") / "output.txt"
     Seq(
-      dbcApiClient := mockClient(Seq(response), outputFile),
+      dbcApiClient := mockClient(Seq(Get(response), Post("")), outputFile),
       dbcClusters += "a",
       dbcClusters += "b",
       TaskKey[Unit]("test") := {
@@ -160,7 +187,7 @@ object TestBuild extends Build {
     val response = mapper.writeValueAsString(exampleClusters)
     val outputFile = file("6") / "output.txt"
     Seq(
-      dbcApiClient := mockClient(Seq(response), outputFile),
+      dbcApiClient := mockClient(Seq(Get(response), Post("")), outputFile),
       dbcClusters += "a", // useless. There to check if we don't do cluster `a` twice
       dbcClusters += "ALL_CLUSTERS",
       TaskKey[Unit]("test") := {
@@ -187,7 +214,7 @@ object TestBuild extends Build {
     val response2 = mapper.writeValueAsString(existingLibs)
     val outputFile = file("7") / "output.txt"
     Seq(
-      dbcApiClient := mockClient(Seq(response1, response2), outputFile),
+      dbcApiClient := mockClient(Seq(Get(response1), Get(response2), Post("")), outputFile),
       dbcClusters += "a",
       dbcClusters += "b",
       name := "test7",
@@ -220,7 +247,7 @@ object TestBuild extends Build {
     val response2 = mapper.writeValueAsString(existingLibs)
     val outputFile = file("8") / "output.txt"
     Seq(
-      dbcApiClient := mockClient(Seq(response1, response2), outputFile),
+      dbcApiClient := mockClient(Seq(Get(response1), Get(response2), Post("")), outputFile),
       dbcClusters += "a", // useless
       dbcClusters += "ALL_CLUSTERS",
       name := "test8",
@@ -238,11 +265,13 @@ object TestBuild extends Build {
           }
         }
         val client = dbcApiClient.value.client
-        val request = ArgumentCaptor.forClass(classOf[HttpPost])
-        verify(client, times(4)).execute(request.capture())
-        Source.fromInputStream(request.getValue.getEntity.getContent).getLines().foreach { json =>
-          if (!json.contains("__ALL_CLUSTERS")) sys.error("Attach wasn't made to __ALL_CLUSTERS")
-        }
+        verify(client, times(2)).POST(anyString())
+        val mockRequest = client.POST("dummy url")
+        val stringContent = new ArgumentCaptor[StringContentProvider]()
+        verify(mockRequest, times(2)).content(stringContent.capture())
+
+        val content = new String(stringContent.getValue.iterator.next.array())
+        assert(content.contains("__ALL_CLUSTERS"))
       }
     )
   }
@@ -262,8 +291,10 @@ object TestBuild extends Build {
         3- Upload all jars to DBC
         4- Attach libraries to the clusters
       */
-      dbcApiClient := mockClient(Seq(clusterList, libraryFetch,
-        uploadedLibResponse("1"), uploadedLibResponse("3"), uploadedLibResponse("4")), outputFile),
+      dbcApiClient := mockClient(Seq(Get(clusterList), Get(libraryFetch),
+        Post(uploadedLibResponse("1")),
+        Post(uploadedLibResponse("3")),
+        Post(uploadedLibResponse("4"))), outputFile),
       dbcClusters += "a",
       dbcLibraryPath := "/def/",
       name := "test9",
@@ -315,9 +346,11 @@ object TestBuild extends Build {
         6- Attach the libraries and restart the cluster(s)
         Empty messages correspond to deleteJar, attachJar, and clusterRestart responses
         */
-      dbcApiClient := mockClient(Seq(clusterList, libraryFetch,
-        t9Res, csv, commons, "", // delete only the SNAPSHOT jar and re-upload it
-        uploadedLibResponse("5"), "", ""), outputFile), // first is attach, last is restart
+      dbcApiClient := mockClient(Seq(Get(clusterList), Get(libraryFetch),
+        Get(t9Res), Get(csv), Get(commons),
+        Post(""), // delete only the SNAPSHOT jar and re-upload it
+        Post (uploadedLibResponse("5")),
+        Post(""), Post("")), outputFile), // first is attach, last is restart
       dbcClusters += "a",
       dbcLibraryPath := "/def/",
       name := "test10",
@@ -369,9 +402,11 @@ object TestBuild extends Build {
     val commons = generateLibStatus("3", "commons-csv-1.1.jar")
     val outputFile = file("12") / "output.txt"
     Seq(
-      dbcApiClient := mockClient(Seq(clusterList, libraryFetch,
-        t12Res, csv, commons, "", // delete only the SNAPSHOT jar and re-upload it
-        uploadedLibResponse("5"), "", "", ""), outputFile), // three attaches, no restart
+      dbcApiClient := mockClient(Seq(Get(clusterList), Get(libraryFetch),
+        Get(t12Res), Get(csv), Get(commons),
+        Post(""), // delete only the SNAPSHOT jar and re-upload it
+        Post(uploadedLibResponse("5")),
+        Post(""), Post(""), Post("")), outputFile), // three attaches, no restart
       dbcClusters += "b",
       dbcLibraryPath := "/def/",
       name := "test12",
@@ -406,9 +441,10 @@ object TestBuild extends Build {
     val commons = generateLibStatus("3", "commons-csv-1.1.jar")
     val outputFile = file("13") / "output.txt"
     Seq(
-      dbcApiClient := mockClient(Seq(clusterList, libraryFetch,
-        t13Res, csv, commons, "", // delete only the SNAPSHOT jar and re-upload it
-        uploadedLibResponse("5")), outputFile), // seven attaches, one restart
+      dbcApiClient := mockClient(Seq(Get(clusterList), Get(libraryFetch),
+        Get(t13Res), Get(csv), Get(commons),
+        Post(""), // delete only the SNAPSHOT jar and re-upload it
+        Post(uploadedLibResponse("5"))), outputFile), // seven attaches, one restart
       dbcClusters += "ALL_CLUSTERS",
       dbcLibraryPath := "/def/",
       name := "test13",
@@ -464,14 +500,14 @@ object TestBuild extends Build {
         6- Command finishes
         7- Destroy context
         */
-        Seq(clusterList,
-            contextIdStr,
-            contextStatusPendingStr,
-            contextStatusRunningStr,
-            commandIdStr,
-            commandStatusRunningStr,
-            commandStatusFinishedStr,
-            contextIdStr),
+        Seq(Get(clusterList),
+          Post(contextIdStr),
+          Get(contextStatusPendingStr),
+          Get(contextStatusRunningStr),
+          Post(commandIdStr),
+          Get(commandStatusRunningStr),
+          Get(commandStatusFinishedStr),
+          Post(contextIdStr)),
         outputFile),
       dbcExecutionLanguage := DBCScala,
       dbcCommandFile := new File("test"),
@@ -513,13 +549,13 @@ object TestBuild extends Build {
         4- Receive command error response
         6- Command terminated - receive command id
         7- Destroy context*/
-        Seq(clusterList,
-            contextIdStr,
-            contextStatusRunningStr,
-            commandIdStr,
-            commandStatusErrorStr,
-            commandIdStr,
-            contextIdStr),
+        Seq(Get(clusterList),
+          Post(contextIdStr),
+          Get(contextStatusRunningStr),
+          Post(commandIdStr),
+          Get(commandStatusErrorStr),
+          Get(commandIdStr),
+          Post(contextIdStr)),
         outputFile),
       dbcExecutionLanguage := DBCScala,
       dbcCommandFile := new File("test"),
@@ -538,24 +574,40 @@ object TestBuild extends Build {
   lazy val test15 = Project(id = "executeCommandFailure", base = file("15"),
     settings = dbcSettings ++ executeCommandFailure)
 
-  def mockClient(responses: Seq[String], file: File): DatabricksHttp = {
-    val client = mmock[HttpClient]
-    val mocks = responses.map { res =>
-      val mockReponse = new BasicHttpResponse(new ProtocolVersion("HTTP", 1, 1), 201, null)
-      mockReponse.setEntity(new StringEntity(res))
-      mockReponse
+  def mockClient(responses: Seq[DBRequest], file: File): DatabricksHttp = {
+    val client = mock[HttpClient]
+    def generateMockRequests(responses: Seq[String]): Seq[Request] = {
+      responses.map { res =>
+        val httpResponse = new HttpResponse(null, null).status(201)
+        val response = new HttpContentResponse(httpResponse, res.getBytes, "application/json", null)
+        val mockRequest = mock[Request]
+        when(mockRequest.content(any())).thenReturn(mockRequest)
+        when(mockRequest.param(any(), any())).thenReturn(mockRequest)
+        when(mockRequest.file(any())).thenReturn(mockRequest)
+        when(mockRequest.send()).thenReturn(response)
+        mockRequest
+      }
     }
-    when(client.execute(any[HttpUriRequest]())).thenReturn(mocks(0), mocks.drop(1): _*)
+    val (getRequests, postRequests) = responses.partition(_.isInstanceOf[Get])
+    val getReqs = generateMockRequests(getRequests.map(_.value))
+    val postReqs = generateMockRequests(postRequests.map(_.value))
+    if (getReqs.nonEmpty) {
+      when(client.newRequest(any[String]())).thenReturn(getReqs(0), getReqs.drop(1): _*)
+    }
+    if (postReqs.nonEmpty) {
+      when(client.POST(any[String]())).thenReturn(postReqs(0), postReqs.drop(1): _*)
+    }
 
     DatabricksHttp.testClient(client, file)
   }
 
   def mockServerError(responses: String, file: File): DatabricksHttp = {
-    val client = mmock[HttpClient]
-    val mockReponse = new BasicHttpResponse(new ProtocolVersion("HTTP", 1, 1), 500, null)
-    when(client.execute(any[HttpUriRequest]())).thenReturn(mockReponse)
+    val client = mock[HttpClient]
+    val httpResponse = new HttpResponse(null, null).status(500)
+    val res = new HttpContentResponse(httpResponse, responses.getBytes(), "application/json", null)
+    val mockRequest = mock[Request]
+    when(client.newRequest(any[URI]())).thenReturn(mockRequest)
+    when(mockRequest.send()).thenReturn(res)
     DatabricksHttp.testClient(client, file)
   }
 }
-
-
