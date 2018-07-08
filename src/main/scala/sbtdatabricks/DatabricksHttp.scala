@@ -490,7 +490,7 @@ object DatabricksHttp {
       HttpClients.custom()
         .setSSLSocketFactory(sslsf)
         .setDefaultCredentialsProvider(provider)
-        .setDefaultHeaders(Seq(new BasicHeader("User-Agent", s"sbt-databricks $version")))
+        .setUserAgent(s"sbt-databricks $version")
         .build()
     client
   }
